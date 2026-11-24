@@ -35,6 +35,19 @@
     z-index: 10;
   }
   header h1 { font-size: 15px; font-weight: 700; white-space: nowrap; color: #38bdf8; }
+  .sync-badge {
+    font-size: 12px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: #334155;
+    color: #e2e8f0;
+    border: 1px solid #475569;
+    white-space: nowrap;
+  }
+  .sync-badge.ok { background: rgba(16,185,129,0.2); color: #34d399; border-color: #10b981; }
+  .sync-badge.busy { background: rgba(245,158,11,0.2); color: #fbbf24; border-color: #f59e0b; }
+  .sync-badge.err { background: rgba(239,68,68,0.2); color: #f87171; border-color: #ef4444; }
+
   .toolbar-group { display: flex; align-items: center; gap: 5px; }
   .toolbar-group label { font-size: 12px; color: var(--muted); }
   input[type="date"], input[type="time"], input[type="text"], input[type="number"] {
@@ -225,7 +238,6 @@
   tr.clickable:hover { background: rgba(56,189,248,0.15); cursor: pointer; }
   tr.selected-date { background: rgba(239,68,68,0.22); }
 
-  /* SVG Pile & Wall styles */
   .pile-group, .wall-group { cursor: pointer; }
   .pile-group:hover .pile-outline { stroke: #ef4444; stroke-width: 1.2; }
   .wall-group:hover .wall-poly { stroke: #ef4444; stroke-width: 1.1; }
@@ -266,6 +278,8 @@
 
 <header>
   <h1>擋土柱・擋土牆進度管理</h1>
+  <span id="syncStatus" class="sync-badge busy">☁️ 連線中...</span>
+  <button id="btnRefreshCloud">🔄 刷新雲端</button>
 
   <div class="toolbar-group">
     <label>工作日期：</label>
@@ -293,7 +307,7 @@
   </div>
 
   <div class="toolbar-group">
-    <input type="text" id="searchInput" placeholder="搜尋 A035 / W012" style="width:130px;" />
+    <input type="text" id="searchInput" placeholder="搜尋 A035 / W012" style="width:125px;" />
     <button id="btnSearch">定位</button>
   </div>
 
@@ -350,7 +364,6 @@
     </div>
 
     <div class="tab-content active" id="tab-edit">
-      <!-- 擋土柱獨立進度 -->
       <div class="card">
         <h3><span>擋土柱各段獨立進度（159 支｜1.2m/支）</span></h3>
         <div class="stat-grid">
@@ -376,7 +389,6 @@
         </div>
       </div>
 
-      <!-- 擋土牆進度 -->
       <div class="card">
         <h3><span style="color:#c084fc;">外圈擋土牆進度（155 支｜2m/支｜總長 310m）</span></h3>
         <div class="stat-grid-2">
@@ -393,7 +405,6 @@
         </div>
       </div>
 
-      <!-- 區間快選 -->
       <div class="card">
         <h3><span>快速區間多選（柱 A001~A159 / 牆 W001~W155）</span></h3>
         <div class="range-box">
@@ -412,7 +423,6 @@
         </p>
       </div>
 
-      <!-- 擋土柱編輯面板（支援單選與多選） -->
       <div class="card" id="editorPilePanel" style="display:none;">
         <h3>
           <span style="font-size:15px;">擋土柱（已選 <span id="editPileCount" style="color:#fbbf24;">1</span> 支）</span>
@@ -465,7 +475,6 @@
         <button class="primary" id="btnSavePile" style="width:100%;padding:8px;font-size:14px;">儲存 / 批次套用至所選擋土柱</button>
       </div>
 
-      <!-- 擋土牆編輯面板（支援單選與多選） -->
       <div class="card" id="editorWallPanel" style="display:none;">
         <h3>
           <span style="font-size:15px;color:#c084fc;">擋土牆（已選 <span id="editWallCount" style="color:#fbbf24;">1</span> 支）</span>
@@ -532,6 +541,8 @@
 
 <script>
 window.addEventListener("DOMContentLoaded", function() {
+  const CLOUD_URL = "https://script.google.com/macros/s/AKfycbxHBPierR9qP_VMqV0UtUGdH75zbKYDT7gJFLVdcGsB_WbLEo8cJWnlfuRrkonBS6qm/exec";
+
   const PILES = [
     ["A001",390.3,109.2,[393.6,117.0,386.1,117.0,386.1,113.8,393.6,113.8]],
     ["A002",402.6,109.2,[406.1,117.0,398.4,117.0,398.4,113.8,406.1,113.8]],
@@ -792,7 +803,14 @@ window.addEventListener("DOMContentLoaded", function() {
 
   let records = {};
   let wallRecords = {};
-  function loadStorage() {
+  const syncStatusEl = document.getElementById("syncStatus");
+
+  function setSyncState(state, text) {
+    syncStatusEl.className = "sync-badge " + state;
+    syncStatusEl.textContent = text;
+  }
+
+  function loadLocalCache() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) records = JSON.parse(raw);
@@ -800,15 +818,51 @@ window.addEventListener("DOMContentLoaded", function() {
       if (rawW) wallRecords = JSON.parse(rawW);
     } catch (e) {}
   }
-  function saveStorage() {
+
+  function saveLocalCache() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
       localStorage.setItem(WALL_STORAGE_KEY, JSON.stringify(wallRecords));
     } catch (e) {}
   }
-  loadStorage();
 
-  let selectedType = null; // "pile" | "wall"
+  async function loadFromCloud() {
+    setSyncState("busy", "☁️ 讀取雲端中...");
+    try {
+      const res = await fetch(CLOUD_URL + "?t=" + Date.now());
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      records = data.piles || {};
+      wallRecords = data.walls || {};
+      saveLocalCache();
+      syncEditorPanel();
+      refreshVisuals();
+      setSyncState("ok", "☁️ 雲端已同步");
+    } catch (e) {
+      setSyncState("err", "⚠️ 雲端讀取失敗（使用本機）");
+    }
+  }
+
+  async function saveStorage() {
+    saveLocalCache();
+    setSyncState("busy", "☁️ 上傳中...");
+    try {
+      const payload = JSON.stringify({ piles: records, walls: wallRecords });
+      const res = await fetch(CLOUD_URL, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: payload
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      setSyncState("ok", "☁️ 雲端已同步");
+    } catch (e) {
+      setSyncState("err", "⚠️ 同步失敗（已暫存本機）");
+    }
+  }
+
+  loadLocalCache();
+
+  let selectedType = null;
   let selectedIds = new Set();
   let multiMode = false;
   let viewMode = "all";
@@ -1163,6 +1217,7 @@ window.addEventListener("DOMContentLoaded", function() {
     refreshVisuals();
   }
 
+  document.getElementById("btnRefreshCloud").addEventListener("click", loadFromCloud);
   document.getElementById("btnSavePile").addEventListener("click", saveCurrentPiles);
   document.getElementById("btnAllDone").addEventListener("click", function() {
     const d = workDateEl.value || todayStr();
@@ -1200,7 +1255,6 @@ window.addEventListener("DOMContentLoaded", function() {
     refreshVisuals();
   });
 
-  // Multi-select & Range select
   const btnMulti = document.getElementById("btnMultiMode");
   btnMulti.addEventListener("click", function() {
     multiMode = !multiMode;
@@ -1470,7 +1524,7 @@ window.addEventListener("DOMContentLoaded", function() {
         }
         saveStorage();
         refreshVisuals();
-        alert("還原成功！");
+        alert("還原成功並已同步至雲端！");
       } catch (err) { alert("檔案格式錯誤"); }
     };
     reader.readAsText(file);
@@ -1587,6 +1641,7 @@ window.addEventListener("DOMContentLoaded", function() {
   });
 
   buildMap();
+  loadFromCloud();
 });
 </script>
 </body>
